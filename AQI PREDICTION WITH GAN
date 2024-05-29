@@ -1,0 +1,173 @@
+
+import numpy as np
+import pandas as pd
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from tensorflow.keras.models import Sequential, Model, load_model
+from tensorflow.keras.layers import Dense, LeakyReLU, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from xgboost import XGBClassifier
+
+# Function to preprocess the dataset
+def preprocess_dataset(data):
+    # Separate numeric and non-numeric columns
+    numeric_columns = data.select_dtypes(include=[np.number]).columns
+    non_numeric_columns = data.select_dtypes(exclude=[np.number]).columns
+
+    # Handling missing values for numeric columns
+    numeric_imputer = SimpleImputer(strategy='mean')
+    data[numeric_columns] = numeric_imputer.fit_transform(data[numeric_columns])
+
+    # Handling missing values for non-numeric columns
+    non_numeric_imputer = SimpleImputer(strategy='most_frequent')
+    data[non_numeric_columns] = non_numeric_imputer.fit_transform(data[non_numeric_columns])
+
+    # Label encoding for non-numeric columns
+    label_encoder = LabelEncoder()
+    data[non_numeric_columns] = data[non_numeric_columns].apply(lambda col: label_encoder.fit_transform(col))
+
+    # Scaling the data to the range [0, 1]
+    scaler = MinMaxScaler()
+    data[numeric_columns] = scaler.fit_transform(data[numeric_columns])
+
+    return data
+
+# Function to get user inputs for GAN training
+def get_gan_user_inputs():
+    latent_dim = int(input("Enter the latent dimension for the GAN: "))
+    gan_epochs = int(input("Enter the total number of GAN training epochs: "))
+    gan_batch_size = int(input("Enter the batch size for GAN training: "))
+    return latent_dim, gan_epochs, gan_batch_size
+
+# Load and preprocess your original dataset
+folder_path = "C:\\Users\\user\\OneDrive\\Desktop\\archive (1)"
+real_data = pd.read_csv(f"{folder_path}\\city_day.csv")
+real_data = preprocess_dataset(real_data)
+
+# Function to build the generator model for GAN
+def build_generator(latent_dim, output_dim):
+    model = Sequential()
+    model.add(Dense(128, input_dim=latent_dim))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(BatchNormalization(momentum=0.8))
+    model.add(Dense(256))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(BatchNormalization(momentum=0.8))
+    model.add(Dense(512))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(BatchNormalization(momentum=0.8))
+    model.add(Dense(output_dim, activation='tanh'))
+    return model
+
+# Function to build the discriminator model for GAN
+def build_discriminator(input_dim):
+    model = Sequential()
+    model.add(Dense(512, input_dim=input_dim))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(Dense(256))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(Dense(1, activation='sigmoid'))
+    return model
+
+# Function to build the GAN model
+def build_gan(generator, discriminator):
+    discriminator.trainable = False
+    model = Sequential()
+    model.add(generator)
+    model.add(discriminator)
+    return model
+
+# Function to train the GAN
+def train_gan(generator, discriminator, gan, real_data, latent_dim, gan_epochs, gan_batch_size):
+    for epoch in range(gan_epochs):
+        noise = np.random.normal(0, 1, size=(gan_batch_size, latent_dim))
+        generated_data = generator.predict(noise)
+        idx = np.random.randint(0, real_data.shape[0], gan_batch_size)
+        real_data_batch = real_data.iloc[idx]
+
+        labels_real = np.ones((gan_batch_size, 1))
+        labels_fake = np.zeros((gan_batch_size, 1))
+
+        # Train discriminator
+        d_loss_real = discriminator.train_on_batch(real_data_batch, labels_real)
+        d_loss_fake = discriminator.train_on_batch(generated_data, labels_fake)
+        d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
+
+        # Train generator
+        noise = np.random.normal(0, 1, size=(gan_batch_size, latent_dim))
+        labels_gan = np.ones((gan_batch_size, 1))
+        g_loss = gan.train_on_batch(noise, labels_gan)
+
+        # Print progress
+        if epoch % 1000 == 0:
+            print(f"{epoch} [D loss: {d_loss[0]} | D accuracy: {100 * d_loss[1]}] [G loss: {g_loss}]")
+
+# Get user inputs for GAN training
+latent_dim, gan_epochs, gan_batch_size = get_gan_user_inputs()
+
+# Build and compile the discriminator for GAN
+data_dim = len(real_data.columns)
+discriminator = build_discriminator(data_dim)
+discriminator.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.0002, beta_1=0.5), metrics=['accuracy'])
+
+# Build and compile the generator for GAN
+generator = build_generator(latent_dim, data_dim)
+generator.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.0002, beta_1=0.5))
+
+# Build and compile the GAN
+discriminator.trainable = False
+gan = build_gan(generator, discriminator)
+gan.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.0002, beta_1=0.5))
+
+# Train the GAN
+train_gan(generator, discriminator, gan, real_data, latent_dim, gan_epochs, gan_batch_size)
+
+# Save the trained generator for future use
+generator.save("generator_model.h5")
+
+# Load the saved generator model
+loaded_generator = load_model("generator_model.h5")
+
+# Function to get user inputs for XGBoost model
+def get_xgboost_user_inputs():
+    xgboost_epochs = int(input("Enter the total number of XGBoost training epochs: "))
+    xgboost_learning_rate = float(input("Enter the learning rate for XGBoost: "))
+    return xgboost_epochs, xgboost_learning_rate
+
+# Get user inputs for XGBoost model
+xgboost_epochs, xgboost_learning_rate = get_xgboost_user_inputs()
+
+# Function to train the XGBoost model
+def train_xgboost_model(xgboost_epochs, xgboost_learning_rate, real_data, loaded_generator):
+    # Generate synthetic features using the trained generator
+    latent_dim = loaded_generator.input_shape[1]
+    noise = np.random.normal(0, 1, size=(real_data.shape[0], latent_dim))
+    synthetic_features = loaded_generator.predict(noise)
+
+    # Combine original and synthetic features
+    combined_features = np.concatenate([real_data.values, synthetic_features], axis=1)
+
+    # Create target variable (e.g., AQI category, adjust as needed)
+    target_variable = pd.qcut(real_data['PM2.5'], q=[0, 0.2, 0.4, 0.6, 0.8, 1], labels=False)
+
+    # Split the data into training and testing sets
+    X_train, X_test, y_train, y_test = train_test_split(combined_features, target_variable, test_size=0.2, random_state=42)
+
+    # Train the XGBoost model
+    xgb_model = XGBClassifier(objective='multi:softmax', num_class=5, learning_rate=xgboost_learning_rate, n_estimators=xgboost_epochs)
+    xgb_model.fit(X_train, y_train)
+
+    # Make predictions on the test set
+    y_pred = xgb_model.predict(X_test)
+
+    # Evaluate the model
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f"Category Prediction Accuracy: {accuracy * 100:.2f}%")
+
+    return xgb_model
+
+# Train the XGBoost modelG
+trained_xgboost_model = train_xgboost_model(xgboost_epochs, xgboost_learning_rate, real_data, loaded_generator)
+
